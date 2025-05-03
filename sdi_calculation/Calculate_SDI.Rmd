@@ -1,0 +1,197 @@
+---
+title: "0 Get Location Matrix"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(stringr)
+library(ggplot2)
+library(cowplot)
+library(parallel)
+library(EBImage)
+library(car)
+library(ROCR)
+library(gfplot)
+library(survival)
+library(ggpubr)
+library(survminer)
+library(mclust)
+library(pROC)
+library(vegan)
+```
+
+# QC 5% and number of patches 64
+```{r}
+# ALL_ARGO_202109 contains all the result of tissue classificaiton
+cl <- makeCluster(40)
+clusterExport(cl,varlist = c("ALL_ARGO_202109")) 
+del_ind <- parSapply(cl,1:length(ALL_ARGO_202109), function(xx){
+  tmp <- ALL_ARGO_202109[[xx]]
+  all_num <- length(intersect(which(tmp!=2),which(tmp!=0))) # black and tissue
+  tum_num <- length(which(tmp==9)) # tumor
+  ratio <- tum_num/all_num
+  if(ratio<=0.05 | tum_num<=64){ # ratio 0.05 and number of patches 64
+    return(xx)
+  }else{
+    return(0)
+  }
+})
+del_ind <- del_ind[-which(del_ind==0)]
+stopCluster(cl)
+ARGO_loc <- ALL_ARGO_202109[-del_ind]
+```
+
+# ARGO Whole-slides numberofSTR and numberofLYM, numberofTUM
+```{r}
+LocMatrix=ARGO_loc
+tumorLabel=9
+delBackLabel=2
+
+# STR
+tissueLabels=8
+numberofSTR <- mclapply(1:length(LocMatrix),function(i){
+  mat <- LocMatrix[[i]]
+  ref_mat <- matrix(0,nrow = nrow(mat) ,ncol = ncol(mat))
+  for (x in 1:nrow(ref_mat)) {
+    for(y in 1:ncol(ref_mat)){
+      ref_mat[x,y] <- paste0(x,"_",y)
+    }
+  }
+  
+  covert2mat <- function(index_n){
+    mat <- ref_mat[index_n]
+    tmpmat <- matrix(0,nrow = length(mat),ncol = 2)
+    for (i in 1:length(mat)) {
+      tmpmat[i,1] <- as.numeric(str_split(mat[i],"_")[[1]][1]) 
+      tmpmat[i,2] <- as.numeric(str_split(mat[i],"_")[[1]][2]) 
+    }
+    return(tmpmat)
+  }
+  
+  if(length(which(mat==tissueLabels))>0){
+    tissue.loc <- covert2mat(which(mat==tissueLabels))
+    cancer.loc <- covert2mat(which(mat==tumorLabel))
+    cancer.centroid <- c(mean(as.numeric(cancer.loc[,1])), mean(as.numeric(cancer.loc[,2])) )
+    
+    score <- dist(rbind(cancer.centroid,tissue.loc))[1:nrow(tissue.loc)]
+  }else{
+    score <- NA
+  }
+  score <- score[!is.na(score)]
+  inner_num <- length(which(score<=Th1))
+  adj_num <- length(which(score > Th1 & score <= Th2))
+  distal_num <- length(score)-length(inner_num)-length(adj_num)
+  all_num <- c(inner_num,adj_num,distal_num)
+  names(all_num) <- c('innerS_num','adjS_num','distalS_num')
+  return(all_num)
+},mc.cores = 40)
+names(numberofSTR) <- names(LocMatrix)
+
+# LYM
+tissueLabels=4
+numberofLYM <- mclapply(1:length(LocMatrix),function(i){
+  mat <- LocMatrix[[i]]
+  ref_mat <- matrix(0,nrow = nrow(mat) ,ncol = ncol(mat))
+  for (x in 1:nrow(ref_mat)) {
+    for(y in 1:ncol(ref_mat)){
+      ref_mat[x,y] <- paste0(x,"_",y)
+    }
+  }
+  
+  covert2mat <- function(index_n){
+    mat <- ref_mat[index_n]
+    tmpmat <- matrix(0,nrow = length(mat),ncol = 2)
+    for (i in 1:length(mat)) {
+      tmpmat[i,1] <- as.numeric(str_split(mat[i],"_")[[1]][1]) 
+      tmpmat[i,2] <- as.numeric(str_split(mat[i],"_")[[1]][2]) 
+    }
+    return(tmpmat)
+  }
+  
+  if(length(which(mat==tissueLabels))>0){
+    tissue.loc <- covert2mat(which(mat==tissueLabels))
+    cancer.loc <- covert2mat(which(mat==tumorLabel))
+    cancer.centroid <- c(mean(as.numeric(cancer.loc[,1])), mean(as.numeric(cancer.loc[,2])) )
+    
+    score <- dist(rbind(cancer.centroid,tissue.loc))[1:nrow(tissue.loc)]
+  }else{
+    score <- NA
+  }
+  score <- score[!is.na(score)]
+  inner_num <- length(which(score<=Th1))
+  adj_num <- length(which(score > Th1 & score <= Th2))
+  distal_num <- length(score)-length(inner_num)-length(adj_num)
+  all_num <- c(inner_num,adj_num,distal_num)
+  names(all_num) <- c('innerL_num','adjL_num','distalL_num')
+  return(all_num)
+},mc.cores = 40)
+names(numberofLYM) <- names(LocMatrix)
+
+numberofTUM <- lapply(1:length(LocMatrix), function(i){
+  tmp <- length(which(LocMatrix[[i]]==9))
+  return(tmp)
+})
+names(numberofTUM) <- names(LocMatrix)  
+```
+
+# ARGO Whole-slides numberofSTR and numberofLYM, and WS Inner SDI
+```{r}
+SDI_inner <- mclapply(1:length(numberofLYM),function(x){
+  tmpinnnerL <- numberofLYM[[x]][1]
+  tmpinnnerS <- numberofSTR[[x]][1]
+  tmpinnnerT <- numberofTUM[[x]]
+  SDD <- entropy(c(tmpinnnerL,tmpinnnerS,tmpinnnerT))
+  return(SDD)
+},mc.cores=30)
+SDI_inner <- do.call(c,SDI_inner)
+all.equal(names(numberofSTR),names(numberofTUM))
+all.equal(names(numberofSTR),names(numberofLYM))
+names(SDI_inner) <- names(numberofSTR)
+
+# aver and max SDI
+PatientNames <- sapply(names(numberofSTR), function(xxx){
+  tmp <- str_split(xxx,"_")[[1]][1]
+  return(tmp)
+})
+PatientNamesUni <- unique(PatientNames)
+# aver_sdi
+Aver_SDI <- sapply(PatientNamesUni, function(x){
+  tmp <- which(PatientNames==x)
+  tmp_aver <- mean(SDI_inner[tmp],na.rm=T) 
+  return(tmp_aver)
+})
+# max_sdi
+Max_SDI <- sapply(PatientNamesUni, function(x){
+  tmp <- which(PatientNames==x)
+  tmp_aver <- max(SDI_inner[tmp],na.rm=T) 
+  return(tmp_aver)
+})
+
+# ARGO Clinical
+ARGO_sdiused_label$Gau_innerAverSDI <- Aver_SDI[match(ARGO_sdiused_label$HEID,names(Aver_SDI))]
+ARGO_sdiused_label$Gau_innerMaxSDI <- Max_SDI[match(ARGO_sdiused_label$HEID,names(Max_SDI))]
+```
+
+# ARGO all patients, averSDI,self median/tcga median, RFS/DFS
+```{r,warning=FALSE}
+# self median
+SDI_label <- as.factor(as.character(label_F(ARGO_sdiused_label$Gau_innerAverSDI, 
+                                            median(ARGO_sdiused_label$Gau_innerAverSDI) )))  
+ARGO_sdiused_label$self_all_inSDI_label <- SDI_label
+ARGO_sdiused_label$self_all_inAverSDI_5 <- as.vector(ARGO_sdiused_label$cms)
+ARGO_sdiused_label$self_all_inAverSDI_5[which(ARGO_sdiused_label$self_all_inSDI_label=="High SDI" 
+                                       & ARGO_sdiused_label$cms=="CMS4")] <- "CMS4_HighSDI"
+ARGO_sdiused_label$self_all_inAverSDI_5[which(ARGO_sdiused_label$self_all_inSDI_label=="Low SDI"
+                                       & ARGO_sdiused_label$cms=="CMS4")] <- "CMS4_LowSDI"
+
+# tcga median
+SDI_label <- as.factor(as.character(label_F(ARGO_sdiused_label$Gau_innerAverSDI, 
+                                            median(TCGA_grant_label_use$Gau_innerSDI) )))  
+ARGO_sdiused_label$tcgaCut_all_inSDI_label <- SDI_label
+ARGO_sdiused_label$tcgaCut_all_inAverSDI_5 <- as.vector(ARGO_sdiused_label$cms)
+ARGO_sdiused_label$tcgaCut_all_inAverSDI_5[which(ARGO_sdiused_label$tcgaCut_all_inSDI_label=="High SDI" 
+                                       & ARGO_sdiused_label$cms=="CMS4")] <- "CMS4_HighSDI"
+ARGO_sdiused_label$tcgaCut_all_inAverSDI_5[which(ARGO_sdiused_label$tcgaCut_all_inSDI_label=="Low SDI"
+                                       & ARGO_sdiused_label$cms=="CMS4")] <- "CMS4_LowSDI"
+```
